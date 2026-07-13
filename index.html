@@ -346,10 +346,8 @@ controls.minDistance = 0.5;
 controls.maxDistance = 20;
 controls.target.set(0,0,0);
 
-let decalMesh = null;
 let currentDesignIndex = 0;
 let currentColorwayIndex = 0;
-let hostMesh = null;
 
 function base64ToArrayBuffer(base64){
   const binaryChunks = [];
@@ -421,22 +419,9 @@ loader.parse(modelArrayBuffer, '', (gltf) => {
   camera.lookAt(0, chestY, 0);
   controls.update();
 
-  // ---- localizar ponto de decal via raycast a partir da camera ----
-  const targetPoint = new THREE.Vector3(finalCenter.x, chestY, finalCenter.z);
-  const rayDir = targetPoint.clone().sub(camera.position).normalize();
-  const raycaster = new THREE.Raycaster(camera.position, rayDir);
-
-  const meshes = [];
-  model.traverse(o => { if(o.isMesh) meshes.push(o); });
-  const hits = raycaster.intersectObjects(meshes, true);
-
   resize();
 
-  if(hits.length > 0){
-    const hit = hits[0];
-    hostMesh = hit.object;
-    buildDecal(hit.point, hit.face.normal, hostMesh);
-  }
+  buildGarment(finalSize, finalCenter, box3);
 
   document.getElementById('loading').style.opacity = '0';
   setTimeout(()=> document.getElementById('loading').style.display='none', 500);
@@ -447,7 +432,85 @@ loader.parse(modelArrayBuffer, '', (gltf) => {
   console.error(err);
 });
 
-function buildDecal(point, faceNormalLocal, mesh){
+let garmentGroup = null;
+let torsoMesh = null;
+let decalMesh = null;
+
+function buildGarment(finalSize, finalCenter, box3){
+  if(garmentGroup){ scene.remove(garmentGroup); }
+  garmentGroup = new THREE.Group();
+
+  // dimensoes da camiseta oversized, baseadas no corpo do manequim
+  const shoulderY = box3.min.y + finalSize.y * 0.80;
+  const hipY      = box3.min.y + finalSize.y * 0.38; // camiseta oversized, comprida
+  const torsoHeight = shoulderY - hipY;
+  const torsoMidY = (shoulderY + hipY) / 2;
+
+  const radiusX = (finalSize.x / 2) * 1.32; // caimento solto (oversized)
+  const radiusZ = (finalSize.z / 2) * 1.55;
+
+  const design = DESIGNS[currentDesignIndex];
+  const colorway = design.colorways[currentColorwayIndex];
+
+  const fabricMaterial = new THREE.MeshStandardMaterial({
+    color: new THREE.Color(colorway.bg),
+    roughness: 0.95,
+    metalness: 0.0,
+    side: THREE.DoubleSide,
+  });
+
+  // ---- corpo da camiseta (tubo elíptico, boxy/oversized) ----
+  const bodyGeo = new THREE.CylinderGeometry(1, 1, 1, 24, 1, true);
+  torsoMesh = new THREE.Mesh(bodyGeo, fabricMaterial);
+  torsoMesh.scale.set(radiusX, torsoHeight, radiusZ);
+  torsoMesh.position.set(finalCenter.x, torsoMidY, finalCenter.z);
+  torsoMesh.userData.isFabric = true;
+  garmentGroup.add(torsoMesh);
+
+  // ---- gola (anel ribbed) ----
+  const collarGeo = new THREE.TorusGeometry(radiusX * 0.30, radiusX * 0.045, 10, 24);
+  const collarMat = new THREE.MeshStandardMaterial({
+    color: new THREE.Color(colorway.ink).offsetHSL(0,0,-0.05),
+    roughness: 0.9,
+  });
+  const collar = new THREE.Mesh(collarGeo, collarMat);
+  collar.rotation.x = Math.PI / 2;
+  collar.position.set(finalCenter.x, shoulderY - torsoHeight * 0.01, finalCenter.z);
+  collar.scale.set(1, 1, 0.85);
+  garmentGroup.add(collar);
+
+  // ---- mangas (drop-shoulder, oversized) ----
+  const sleeveLength = torsoHeight * 0.62;
+  const sleeveRadius = radiusX * 0.40;
+  [-1, 1].forEach((side) => {
+    const sleeveGeo = new THREE.CylinderGeometry(sleeveRadius, sleeveRadius * 0.86, sleeveLength, 14, 1, true);
+    const sleeve = new THREE.Mesh(sleeveGeo, fabricMaterial);
+    sleeve.userData.isFabric = true;
+    sleeve.position.set(
+      finalCenter.x + side * radiusX * 0.96,
+      shoulderY - sleeveLength * 0.32,
+      finalCenter.z
+    );
+    sleeve.rotation.z = side * (Math.PI * 0.16);
+    sleeve.rotation.x = 0.06;
+    garmentGroup.add(sleeve);
+  });
+
+  scene.add(garmentGroup);
+
+  // ---- estampa: projeta um decal reto na frente do torso ----
+  const printY = torsoMidY + torsoHeight * 0.16;
+  const rayOrigin = new THREE.Vector3(finalCenter.x, printY, finalCenter.z + radiusZ * 4);
+  const rayDir = new THREE.Vector3(0, 0, -1);
+  const raycaster = new THREE.Raycaster(rayOrigin, rayDir);
+  const hits = raycaster.intersectObject(torsoMesh, false);
+
+  if(hits.length > 0){
+    buildDecal(hits[0].point, hits[0].face.normal, torsoMesh, radiusX);
+  }
+}
+
+function buildDecal(point, faceNormalLocal, mesh, hostRadius){
   if(decalMesh){ scene.remove(decalMesh); decalMesh.geometry.dispose(); decalMesh.material.dispose(); }
 
   // normal em espaco mundo
@@ -458,15 +521,13 @@ function buildDecal(point, faceNormalLocal, mesh){
   dummy.position.copy(point);
   dummy.lookAt(point.clone().add(worldNormal));
 
-  const box = new THREE.Box3().setFromObject(mesh);
-  const size = new THREE.Vector3(); box.getSize(size);
-  const decalScale = size.y * 0.32;
+  const decalScale = hostRadius * 0.62;
 
   const geometry = new DecalGeometry(
     mesh,
     point,
     dummy.rotation,
-    new THREE.Vector3(decalScale, decalScale, decalScale * 1.2)
+    new THREE.Vector3(decalScale, decalScale, decalScale * 1.4)
   );
 
   const design = DESIGNS[currentDesignIndex];
@@ -489,12 +550,23 @@ function buildDecal(point, faceNormalLocal, mesh){
 }
 
 function updateDecalTexture(){
-  if(!decalMesh) return;
+  if(!garmentGroup || !torsoMesh) return;
   const design = DESIGNS[currentDesignIndex];
   const colorway = design.colorways[currentColorwayIndex];
+
+  // recolore o tecido da camiseta (torso + mangas) pra bater com a colorway escolhida
+  garmentGroup.traverse((o) => {
+    if(o.isMesh && o.userData.isFabric){
+      o.material.color.set(colorway.bg);
+    }
+  });
+
+  // atualiza a estampa da frente
   const { tex } = makeTexture(design, colorway);
-  decalMesh.material.map = tex;
-  decalMesh.material.needsUpdate = true;
+  if(decalMesh){
+    decalMesh.material.map = tex;
+    decalMesh.material.needsUpdate = true;
+  }
 }
 
 function animate(){
