@@ -390,6 +390,7 @@ loader.parse(modelArrayBuffer, '', (gltf) => {
   model.traverse((o) => {
     if (o.isMesh) {
       o.material = claySculptMaterial;
+      bodyMeshes.push(o);
     }
   });
 
@@ -432,85 +433,45 @@ loader.parse(modelArrayBuffer, '', (gltf) => {
   console.error(err);
 });
 
-let garmentGroup = null;
-let torsoMesh = null;
 let decalMesh = null;
+let bodyMeshes = [];
 
 function buildGarment(finalSize, finalCenter, box3){
-  if(garmentGroup){ scene.remove(garmentGroup); }
-  garmentGroup = new THREE.Group();
+  // altura do peito (um pouco abaixo do ombro, onde uma estampa de camiseta fica)
+  const chestY = box3.min.y + finalSize.y * 0.64;
 
-  // dimensoes da camiseta oversized, baseadas no corpo do manequim
-  const shoulderY = box3.min.y + finalSize.y * 0.80;
-  const hipY      = box3.min.y + finalSize.y * 0.38; // camiseta oversized, comprida
-  const torsoHeight = shoulderY - hipY;
-  const torsoMidY = (shoulderY + hipY) / 2;
+  // mede a LARGURA REAL do corpo nessa altura disparando raios horizontais
+  // contra a malha de verdade do manequim — assim a estampa sai do tamanho
+  // certo pro corpo dele, em vez de um valor chutado.
+  const farX = finalSize.x * 1.5;
+  const rcRight = new THREE.Raycaster(
+    new THREE.Vector3(finalCenter.x - farX, chestY, finalCenter.z),
+    new THREE.Vector3(1, 0, 0)
+  );
+  const rcLeft = new THREE.Raycaster(
+    new THREE.Vector3(finalCenter.x + farX, chestY, finalCenter.z),
+    new THREE.Vector3(-1, 0, 0)
+  );
+  const hitsRight = rcRight.intersectObjects(bodyMeshes, true);
+  const hitsLeft = rcLeft.intersectObjects(bodyMeshes, true);
 
-  const radiusX = (finalSize.x / 2) * 1.32; // caimento solto (oversized)
-  const radiusZ = (finalSize.z / 2) * 1.55;
+  let bodyWidth = finalSize.x * 0.42; // fallback caso os raios nao acertem nada
+  if (hitsRight.length && hitsLeft.length) {
+    bodyWidth = Math.abs(hitsLeft[0].point.x - hitsRight[0].point.x);
+  }
 
-  const design = DESIGNS[currentDesignIndex];
-  const colorway = design.colorways[currentColorwayIndex];
+  // acha o ponto/normal de projecao vindo de frente (mesma tecnica da camera)
+  const targetPoint = new THREE.Vector3(finalCenter.x, chestY, finalCenter.z);
+  const rayDir = targetPoint.clone().sub(camera.position).normalize();
+  const raycaster = new THREE.Raycaster(camera.position, rayDir);
+  const hits = raycaster.intersectObjects(bodyMeshes, true);
 
-  const fabricMaterial = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(colorway.bg),
-    roughness: 0.95,
-    metalness: 0.0,
-    side: THREE.DoubleSide,
-  });
-
-  // ---- corpo da camiseta (tubo elíptico, boxy/oversized) ----
-  const bodyGeo = new THREE.CylinderGeometry(1, 1, 1, 24, 1, true);
-  torsoMesh = new THREE.Mesh(bodyGeo, fabricMaterial);
-  torsoMesh.scale.set(radiusX, torsoHeight, radiusZ);
-  torsoMesh.position.set(finalCenter.x, torsoMidY, finalCenter.z);
-  torsoMesh.userData.isFabric = true;
-  garmentGroup.add(torsoMesh);
-
-  // ---- gola (anel ribbed) ----
-  const collarGeo = new THREE.TorusGeometry(radiusX * 0.30, radiusX * 0.045, 10, 24);
-  const collarMat = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(colorway.ink).offsetHSL(0,0,-0.05),
-    roughness: 0.9,
-  });
-  const collar = new THREE.Mesh(collarGeo, collarMat);
-  collar.rotation.x = Math.PI / 2;
-  collar.position.set(finalCenter.x, shoulderY - torsoHeight * 0.01, finalCenter.z);
-  collar.scale.set(1, 1, 0.85);
-  garmentGroup.add(collar);
-
-  // ---- mangas (drop-shoulder, oversized) ----
-  const sleeveLength = torsoHeight * 0.62;
-  const sleeveRadius = radiusX * 0.40;
-  [-1, 1].forEach((side) => {
-    const sleeveGeo = new THREE.CylinderGeometry(sleeveRadius, sleeveRadius * 0.86, sleeveLength, 14, 1, true);
-    const sleeve = new THREE.Mesh(sleeveGeo, fabricMaterial);
-    sleeve.userData.isFabric = true;
-    sleeve.position.set(
-      finalCenter.x + side * radiusX * 0.96,
-      shoulderY - sleeveLength * 0.32,
-      finalCenter.z
-    );
-    sleeve.rotation.z = side * (Math.PI * 0.16);
-    sleeve.rotation.x = 0.06;
-    garmentGroup.add(sleeve);
-  });
-
-  scene.add(garmentGroup);
-
-  // ---- estampa: projeta um decal reto na frente do torso ----
-  const printY = torsoMidY + torsoHeight * 0.16;
-  const rayOrigin = new THREE.Vector3(finalCenter.x, printY, finalCenter.z + radiusZ * 4);
-  const rayDir = new THREE.Vector3(0, 0, -1);
-  const raycaster = new THREE.Raycaster(rayOrigin, rayDir);
-  const hits = raycaster.intersectObject(torsoMesh, false);
-
-  if(hits.length > 0){
-    buildDecal(hits[0].point, hits[0].face.normal, torsoMesh, radiusX);
+  if (hits.length > 0) {
+    buildDecal(hits[0].point, hits[0].face.normal, hits[0].object, bodyWidth);
   }
 }
 
-function buildDecal(point, faceNormalLocal, mesh, hostRadius){
+function buildDecal(point, faceNormalLocal, mesh, bodyWidth){
   if(decalMesh){ scene.remove(decalMesh); decalMesh.geometry.dispose(); decalMesh.material.dispose(); }
 
   // normal em espaco mundo
@@ -521,13 +482,16 @@ function buildDecal(point, faceNormalLocal, mesh, hostRadius){
   dummy.position.copy(point);
   dummy.lookAt(point.clone().add(worldNormal));
 
-  const decalScale = hostRadius * 0.62;
+  // estampa dimensionada pra largura REAL do corpo medida por raycast
+  const decalWidth = bodyWidth * 0.82;
+  const decalHeight = decalWidth * 1.25;
+  const decalDepth = Math.max(bodyWidth * 0.5, 0.05);
 
   const geometry = new DecalGeometry(
     mesh,
     point,
     dummy.rotation,
-    new THREE.Vector3(decalScale, decalScale, decalScale * 1.4)
+    new THREE.Vector3(decalWidth, decalHeight, decalDepth)
   );
 
   const design = DESIGNS[currentDesignIndex];
@@ -541,7 +505,7 @@ function buildDecal(point, faceNormalLocal, mesh, hostRadius){
     depthWrite: false,
     polygonOffset: true,
     polygonOffsetFactor: -4,
-    roughness: 0.85,
+    roughness: 0.88,
     metalness: 0,
   });
 
@@ -550,23 +514,12 @@ function buildDecal(point, faceNormalLocal, mesh, hostRadius){
 }
 
 function updateDecalTexture(){
-  if(!garmentGroup || !torsoMesh) return;
+  if(!decalMesh) return;
   const design = DESIGNS[currentDesignIndex];
   const colorway = design.colorways[currentColorwayIndex];
-
-  // recolore o tecido da camiseta (torso + mangas) pra bater com a colorway escolhida
-  garmentGroup.traverse((o) => {
-    if(o.isMesh && o.userData.isFabric){
-      o.material.color.set(colorway.bg);
-    }
-  });
-
-  // atualiza a estampa da frente
   const { tex } = makeTexture(design, colorway);
-  if(decalMesh){
-    decalMesh.material.map = tex;
-    decalMesh.material.needsUpdate = true;
-  }
+  decalMesh.material.map = tex;
+  decalMesh.material.needsUpdate = true;
 }
 
 function animate(){
